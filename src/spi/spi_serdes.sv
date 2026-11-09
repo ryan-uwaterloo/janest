@@ -1,0 +1,121 @@
+`default_nettype none
+// SPI peripheral: deserializer (COPI -> frame fields) + serializer (read data -> CIPO).
+//
+// Frame (16 bits, MSB first, SPI mode 0: CPOL=0 / CPHA=0, i.e. sampled on the
+// rising edge of sclk, CIPO changes on the falling edge):
+//
+//     [15]    read_write   (value READ_BIT means "read")
+//     [14:8]  addr
+//     [7:0]   data         write: master -> peripheral on COPI
+//                          read : peripheral -> master on CIPO
+//
+// Read flow:
+//   1. Address phase completes (8th rising sclk edge) on a read frame:
+//      `read_req` pulses for one clk cycle, `addr` is stable.
+//   2. The core supplies `read_data` for that address.
+//   3. At the falling sclk edge right after the address phase, `read_data` is
+//      sampled ONCE and shifted out MSB-first on CIPO (bit 7 is on the wire
+//      before the 9th rising edge).
+//   `read_data` is therefore needed no later than (sclk half-period - 1) clk
+//   cycles after `read_req`. A combinational lookup on `addr` always meets it.
+//
+// Timing limits (inherent to a peripheral that samples sclk with clk, not
+// clocked by sclk itself):
+//   - CIPO changes about CDC_LEN+2 clk cycles after the pin's sclk falling
+//     edge; that must fit inside half an sclk period with margin
+//     (roughly sclk <= clk/10 for CDC_LEN = 2).
+module spi_serdes #(
+    parameter int   CDC_LEN   = 2,      // synchronizer depth for sclk / copi / n_cs
+) (
+    input  logic       clk,
+    input  logic       sclk,
+    input  logic       copi,
+    input  logic       n_cs,
+    input  logic       rst_n,
+    output logic       cipo,
+
+    output logic [7:0] data,
+    output logic       valid,           // high from the last bit until the next frame's first bit
+
+    // read path
+    output logic       tx_start,        // high when first byte (read fifo status), low otherwise
+    input  logic [7:0] read_data,       // sampled once at the first data-phase falling edge
+    output logic       read_next_byte   // when issuing last bit of current byte, request next
+);
+
+  // ---------------------------------------------------------------------------
+  // Synchronizers. sclk has one extra stage, so an sclk edge is detected one
+  // clk cycle after it reaches the last copi / n_cs stage. copi is therefore
+  // sampled one clk cycle after the real sclk rising edge, which is safe in
+  // mode 0 because the master only changes COPI on the falling edge (same
+  // alignment as the original deserializer).
+  // ---------------------------------------------------------------------------
+  logic [CDC_LEN:0]   sclk_sync;
+  logic [CDC_LEN-1:0] copi_sync;
+  logic [CDC_LEN-1:0] n_cs_sync;
+
+  always_ff @(posedge clk) begin
+    sclk_sync[0] <= sclk;
+    copi_sync[0] <= copi;
+    n_cs_sync[0] <= n_cs;
+    for (int i = 1; i < CDC_LEN; i++) begin
+      sclk_sync[i] <= sclk_sync[i-1];
+      copi_sync[i] <= copi_sync[i-1];
+      n_cs_sync[i] <= n_cs_sync[i-1];
+    end
+    sclk_sync[CDC_LEN] <= sclk_sync[CDC_LEN-1];
+  end
+
+  logic cs_active, sclk_rise, sclk_fall, copi_s;
+  assign cs_active = ~n_cs_sync[CDC_LEN-1];
+  assign sclk_rise =  sclk_sync[CDC_LEN] & ~sclk_sync[CDC_LEN-1] & cs_active;
+  assign sclk_fall = ~sclk_sync[CDC_LEN] &  sclk_sync[CDC_LEN-1] & cs_active;
+  assign copi_s    =  copi_sync[CDC_LEN-1];
+
+  // ---------------------------------------------------------------------------
+  // SPI SerDes
+  // ---------------------------------------------------------------------------
+  logic [2:0] txn_count;
+  logic [6:0] tx_shift;     // remaining read bits after bit 7
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      txn_count  <= 3'd7;
+      read_write <= 1'b0;
+      addr       <= '0;
+      data       <= '0;
+      valid      <= 1'b0;
+      read_req   <= 1'b0;
+      cipo       <= 1'b0;
+      tx_shift   <= '0;
+      tx_start   <= 1'b1;
+    end else begin
+      read_req <= 1'b0;
+
+      if (!cs_active) begin
+        // CS released: drop any partial frame so the next one starts aligned.
+        txn_count <= 3'd7;
+        tx_start  <= 1'b1;
+        cipo      <= 1'b0;
+
+      end else if (sclk_rise) begin
+        // ---- deserializer ----
+        txn_count <= txn_count - 3'd1;
+        valid     <= (txn_count == 3'd0);
+        data      <= {data[6:0], copi_s};
+
+      end else if (sclk_fall) begin
+        // ---- serializer ----
+        tx_start <= 1'b0; //clear start flag when we consume FIFO status
+        if (txn_count == 3'd7) begin
+          cipo     <= read_data[7];
+          tx_shift <= read_data[6:0];
+        end else begin
+          cipo     <= tx_shift[6];
+          tx_shift <= {tx_shift[5:0], 1'b0};
+        end
+      end
+    end
+  end
+
+endmodule : spi_serdes
