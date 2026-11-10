@@ -1,4 +1,4 @@
-`default_nettype 
+`default_nettype none
 
 module spi_top (
 
@@ -62,7 +62,9 @@ module spi_top (
     .in_push_ready(in_push_ready),
     .out_push_data(out_push_data),
     .out_push_valid(out_push_valid),
-    .out_push_ready(out_push_ready)
+    .out_push_ready(out_push_ready),
+    .in_free(in_free),
+    .out_count(out_count)
   );
 
   logic [7:0] serdes_read_data;
@@ -70,6 +72,7 @@ module spi_top (
   logic serdes_tx_start;
   logic [7:0] serdes_write_data;
   logic serdes_write_ready;
+  logic [3:0] serdes_max_writes, serdes_max_reads;
 
   spi_serdes spi_serdes_inst (
     .clk(clk),
@@ -80,10 +83,12 @@ module spi_top (
     .cipo(cipo),
     .data(serdes_read_data),
     .valid(serdes_read_valid),
-    .tx_shift(serdes_tx_start),
     .read_data(serdes_write_data),
-    .read_next_byte(serdes_write_ready)
-  )
+    .read_next_byte(serdes_write_ready),
+    .num_write_slots(serdes_max_writes),
+    .num_read_slots(serdes_max_reads),
+    .tx_start(serdes_tx_start)
+  );
 
   logic pending_read;
   always_comb begin : host2fifo_ready
@@ -99,7 +104,7 @@ module spi_top (
   logic fifo_read_valid, fifo_write_valid;
   assign fifo_read_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_FROM_HOST);
   assign fifo_write_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_TO_HOST);
-  assign core_resp_data = {8{1'b0}, in_pop_data};
+  assign core_resp_data = {{8{1'b0}}, in_pop_data};
 
   always_ff @( clk ) begin : host2fifo_data
     if (!rst_n) begin
@@ -124,7 +129,7 @@ module spi_top (
   typedef enum logic [1:0] { 
     IDLE = 2'h0,
     MEM  = 2'h1,
-    FIFO = 2'h2,
+    FIFO = 2'h2
   } spi_state_t;
 
   spi_state_t spi_state;  
@@ -132,6 +137,7 @@ module spi_top (
   // logic [params::FIFOS_W-1:0] max_count;
   logic mem_bit;
   logic mem_addr_flag;
+  logic [3:0] num_pending_writes, num_sent_reads;
 
   always_ff @( clk ) begin : spi_state_handling_ff
     if (!rst_n) begin
@@ -142,7 +148,10 @@ module spi_top (
       mem_req_data <= '0;
 
       mem_bit <= '0;
-      mem_addr_flag <= '0'
+      mem_addr_flag <= '0;
+
+      num_pending_writes <= '0;
+      num_sent_reads <= '0;
     end else begin
       spi_state <= next_spi_state;
 
@@ -169,14 +178,26 @@ module spi_top (
 
       if (spi_state == IDLE) begin
         mem_bit <= '0;
-        mem_addr_flag <= '0'
+        mem_addr_flag <= '0;
+        if (next_spi_state == FIFO) begin 
+          num_pending_writes <= serdes_read_data[4:1] > serdes_max_writes ? serdes_read_data[4:1] : serdes_max_writes;
+        end else begin 
+          num_pending_writes <= '0;
+          num_sent_reads <= '0;
+        end
+      end
+
+      if (spi_state == FIFO) begin
+        if (in_push_valid) num_pending_writes <= num_pending_writes - 1;
+        if (out_pop_ready) num_sent_reads <= num_sent_reads + 1;
       end
     end
   end
 
   always_comb begin : spi_state_handling_comb
     out_pop_ready = 1'b0;
-    case (spi_state):
+    in_push_valid = 1'b0;
+    case (spi_state)
       IDLE: begin
         if (serdes_read_valid) begin
           next_spi_state = serdes_read_data[0] ? MEM : FIFO; // 8'01 = mem, 8'h00 = fifo
@@ -189,11 +210,19 @@ module spi_top (
       end
       FIFO: begin
         serdes_write_data = out_pop_data;
-        out_pop_ready = serdes_read_next_byte & ~out_pop_valid;
+        out_pop_ready = serdes_write_ready & (num_sent_reads != serdes_max_reads);
+        in_push_valid = serdes_read_valid & (num_pending_writes != '0);
         next_spi_state = serdes_tx_start ? IDLE : FIFO;
       end
       default: next_spi_state = IDLE;
     endcase
   end
+
+  assign in_push_data = serdes_read_data;
+
+  // `ifndef SYNTHESIS
+  //   assert (!(in_push_valid & !in_push_ready)) 
+  //   else   $error("%m pushing to full in_fifo!!");
+  // `endif SYNTHESIS
     
 endmodule

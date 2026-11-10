@@ -1,31 +1,13 @@
 `default_nettype none
 // SPI peripheral: deserializer (COPI -> frame fields) + serializer (read data -> CIPO).
 //
-// Frame (16 bits, MSB first, SPI mode 0: CPOL=0 / CPHA=0, i.e. sampled on the
-// rising edge of sclk, CIPO changes on the falling edge):
-//
-//     [15]    read_write   (value READ_BIT means "read")
-//     [14:8]  addr
-//     [7:0]   data         write: master -> peripheral on COPI
-//                          read : peripheral -> master on CIPO
-//
-// Read flow:
-//   1. Address phase completes (8th rising sclk edge) on a read frame:
-//      `read_req` pulses for one clk cycle, `addr` is stable.
-//   2. The core supplies `read_data` for that address.
-//   3. At the falling sclk edge right after the address phase, `read_data` is
-//      sampled ONCE and shifted out MSB-first on CIPO (bit 7 is on the wire
-//      before the 9th rising edge).
-//   `read_data` is therefore needed no later than (sclk half-period - 1) clk
-//   cycles after `read_req`. A combinational lookup on `addr` always meets it.
-//
 // Timing limits (inherent to a peripheral that samples sclk with clk, not
 // clocked by sclk itself):
 //   - CIPO changes about CDC_LEN+2 clk cycles after the pin's sclk falling
 //     edge; that must fit inside half an sclk period with margin
 //     (roughly sclk <= clk/10 for CDC_LEN = 2).
 module spi_serdes #(
-    parameter int   CDC_LEN   = 2,      // synchronizer depth for sclk / copi / n_cs
+    parameter int   CDC_LEN   = 2      // synchronizer depth for sclk / copi / n_cs
 ) (
     input  logic       clk,
     input  logic       sclk,
@@ -40,7 +22,9 @@ module spi_serdes #(
     // read path
     output logic       tx_start,        // high when first byte (read fifo status), low otherwise
     input  logic [7:0] read_data,       // sampled once at the first data-phase falling edge
-    output logic       read_next_byte   // when issuing last bit of current byte, request next
+    output logic       read_next_byte,  // when issuing last bit of current byte, request next
+    output logic [3:0] num_write_slots, // the number of write slots captured
+    output logic [3:0] num_read_slots   // the number of reads scheduled to be sent
 );
 
   // ---------------------------------------------------------------------------
@@ -81,16 +65,15 @@ module spi_serdes #(
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       txn_count  <= 3'd7;
-      read_write <= 1'b0;
-      addr       <= '0;
-      data       <= '0;
       valid      <= 1'b0;
-      read_req   <= 1'b0;
       cipo       <= 1'b0;
       tx_shift   <= '0;
       tx_start   <= 1'b1;
+      read_next_byte <= 1'b0;
+      num_write_slots <= '0;
+      num_read_slots <= '0;
     end else begin
-      read_req <= 1'b0;
+      read_next_byte <= 1'b0 <= 1'b0;
 
       if (!cs_active) begin
         // CS released: drop any partial frame so the next one starts aligned.
@@ -113,6 +96,13 @@ module spi_serdes #(
         end else begin
           cipo     <= tx_shift[6];
           tx_shift <= {tx_shift[5:0], 1'b0};
+        end
+        if (txn_count == '0) begin
+          read_next_byte <= 1'b1;
+        end
+        if (tx_start) begin
+          num_write_slots <= read_data[7:4];
+          num_read_slots  <= read_data[3:0];
         end
       end
     end

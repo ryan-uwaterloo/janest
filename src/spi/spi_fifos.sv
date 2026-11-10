@@ -1,27 +1,27 @@
 `default_nettype none
 
 module spi_fifos (
-    input  logic clk;
-    input  logic rst_n;
+    input  logic clk,
+    input  logic rst_n,
 
-    output logic [7:0] in_pop_data;
-    output logic       in_pop_valid;
-    input  logic       in_pop_ready;
+    output logic [7:0] in_pop_data,
+    output logic       in_pop_valid,
+    input  logic       in_pop_ready,
 
-    output logic [7:0] out_pop_data;
-    output logic       out_pop_valid;
-    input  logic       out_pop_ready;
+    output logic [7:0] out_pop_data,
+    output logic       out_pop_valid,
+    input  logic       out_pop_ready,
 
-    input  logic [7:0] in_push_data;
-    input  logic       in_push_valid;
-    output logic       in_push_ready;
+    input  logic [7:0] in_push_data,
+    input  logic       in_push_valid,
+    output logic       in_push_ready,
 
-    input  logic [7:0] out_push_data;
-    input  logic       out_push_valid;
-    output logic       out_push_ready;
+    input  logic [7:0] out_push_data,
+    input  logic       out_push_valid,
+    output logic       out_push_ready,
 
-    output logic [params::FIFOS_W-1:0] in_free;
-    output logic [params::FIFOS_W-1:0] out_count;
+    output logic [params::FIFOS_W-1:0] in_free,
+    output logic [params::FIFOS_W-1:0] out_count
 );
 
     logic in_empty;
@@ -51,7 +51,7 @@ module spi_fifos (
         .count(in_count),
         .free(in_free),
         .underflow(in_underflow),
-        .overflow(in_underflow,)
+        .overflow(in_overflow)
     );
 
     logic out_empty;
@@ -81,7 +81,7 @@ module spi_fifos (
         .count(out_count),
         .free(out_free),
         .underflow(out_underflow),
-        .overflow(out_underflow,)
+        .overflow(out_overflow)
     );
 
     assign in_pop_valid = ~in_empty;
