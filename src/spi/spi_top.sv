@@ -45,8 +45,8 @@ module spi_top (
   logic       out_push_valid;
   logic       out_push_ready;
 
-  logic [params::FIFOS_W-1:0] in_free;
-  logic [params::FIFOS_W-1:0] out_count;
+  logic [params::FIFOS_W:0] in_free;
+  logic [params::FIFOS_W:0] out_count;
 
   spi_fifos spi_fifos_inst (
     .clk(clk),
@@ -104,15 +104,17 @@ module spi_top (
   logic fifo_read_valid, fifo_write_valid;
   assign fifo_read_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_FROM_HOST);
   assign fifo_write_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_TO_HOST);
-  assign core_resp_data = {{8{1'b0}}, in_pop_data};
+  // assign core_resp_data = {{8{1'b0}}, in_pop_data};
 
-  always_ff @( clk ) begin : host2fifo_data
+  always_ff @(posedge clk ) begin : host2fifo_data
     if (!rst_n) begin
       pending_read <= '0;
       core_resp_valid <= '0;
     end else begin 
+      core_resp_valid <= '0;
       if (fifo_read_valid | pending_read) begin
         core_resp_valid <= 1'b1;
+        core_resp_data  <= {{8{1'b0}}, in_pop_data};
         if (core_resp_ready) begin
           pending_read <= 1'b0;
         end else begin
@@ -139,7 +141,7 @@ module spi_top (
   logic mem_addr_flag;
   logic [3:0] num_pending_writes, num_sent_reads;
 
-  always_ff @( clk ) begin : spi_state_handling_ff
+  always_ff @(posedge clk ) begin : spi_state_handling_ff
     if (!rst_n) begin
       spi_state <= IDLE;
 
@@ -169,18 +171,20 @@ module spi_top (
           if (mem_bit) begin
             mem_req_data[15:8] <= serdes_read_data;
             mem_req_valid <= 1'b1;
-            mem_req_addr <= mem_req_addr + 2; // assumes byte addressable memory
           end else begin
             mem_req_data[7:0] <= serdes_read_data;
           end
         end
+      end
+      if (mem_req_valid & mem_req_ready) begin
+        mem_req_addr <= mem_req_addr + 2; // assumes byte addressable memory
       end
 
       if (spi_state == IDLE) begin
         mem_bit <= '0;
         mem_addr_flag <= '0;
         if (next_spi_state == FIFO) begin 
-          num_pending_writes <= serdes_read_data[4:1] > serdes_max_writes ? serdes_read_data[4:1] : serdes_max_writes;
+          num_pending_writes <= serdes_read_data[4:1] < serdes_max_writes ? serdes_read_data[4:1] : serdes_max_writes;
         end else begin 
           num_pending_writes <= '0;
           num_sent_reads <= '0;

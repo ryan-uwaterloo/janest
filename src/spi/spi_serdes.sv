@@ -6,6 +6,7 @@
 //   - CIPO changes about CDC_LEN+2 clk cycles after the pin's sclk falling
 //     edge; that must fit inside half an sclk period with margin
 //     (roughly sclk <= clk/10 for CDC_LEN = 2).
+// Runs in SPI Mode 0
 module spi_serdes #(
     parameter int   CDC_LEN   = 2      // synchronizer depth for sclk / copi / n_cs
 ) (
@@ -36,7 +37,7 @@ module spi_serdes #(
   // ---------------------------------------------------------------------------
   logic [CDC_LEN:0]   sclk_sync;
   logic [CDC_LEN-1:0] copi_sync;
-  logic [CDC_LEN-1:0] n_cs_sync;
+  logic [CDC_LEN:0] n_cs_sync;
 
   always_ff @(posedge clk) begin
     sclk_sync[0] <= sclk;
@@ -48,17 +49,20 @@ module spi_serdes #(
       n_cs_sync[i] <= n_cs_sync[i-1];
     end
     sclk_sync[CDC_LEN] <= sclk_sync[CDC_LEN-1];
+    n_cs_sync[CDC_LEN] <= n_cs_sync[CDC_LEN-1];
   end
 
-  logic cs_active, sclk_rise, sclk_fall, copi_s;
+  logic cs_active, cs_start, sclk_rise, sclk_fall, copi_s;
   assign cs_active = ~n_cs_sync[CDC_LEN-1];
-  assign sclk_rise =  sclk_sync[CDC_LEN] & ~sclk_sync[CDC_LEN-1] & cs_active;
-  assign sclk_fall = ~sclk_sync[CDC_LEN] &  sclk_sync[CDC_LEN-1] & cs_active;
+  assign cs_start  = n_cs_sync[CDC_LEN] & cs_active;
+  assign sclk_rise =  ~sclk_sync[CDC_LEN] & sclk_sync[CDC_LEN-1] & cs_active;
+  assign sclk_fall = sclk_sync[CDC_LEN] &  ~sclk_sync[CDC_LEN-1] & cs_active;
   assign copi_s    =  copi_sync[CDC_LEN-1];
 
   // ---------------------------------------------------------------------------
   // SPI SerDes
   // ---------------------------------------------------------------------------
+  logic read_next_byte_int;
   logic [2:0] txn_count;
   logic [6:0] tx_shift;     // remaining read bits after bit 7
 
@@ -72,8 +76,15 @@ module spi_serdes #(
       read_next_byte <= 1'b0;
       num_write_slots <= '0;
       num_read_slots <= '0;
+      read_next_byte_int <= '0;
     end else begin
-      read_next_byte <= 1'b0 <= 1'b0;
+      read_next_byte <= 1'b0;
+      valid <= 1'b0;
+
+      if (cs_start) begin
+        num_write_slots <= read_data[7:4];
+        num_read_slots  <= read_data[3:0];
+      end
 
       if (!cs_active) begin
         // CS released: drop any partial frame so the next one starts aligned.
@@ -81,6 +92,11 @@ module spi_serdes #(
         tx_start  <= 1'b1;
         cipo      <= 1'b0;
 
+      end else if (cs_start | (read_next_byte_int & sclk_fall)) begin
+        tx_start <= 1'b0; //clear start flag when we consume FIFO status
+        cipo     <= read_data[7];
+        tx_shift <= read_data[6:0];
+        read_next_byte_int <= 0;
       end else if (sclk_rise) begin
         // ---- deserializer ----
         txn_count <= txn_count - 3'd1;
@@ -89,20 +105,11 @@ module spi_serdes #(
 
       end else if (sclk_fall) begin
         // ---- serializer ----
-        tx_start <= 1'b0; //clear start flag when we consume FIFO status
-        if (txn_count == 3'd7) begin
-          cipo     <= read_data[7];
-          tx_shift <= read_data[6:0];
-        end else begin
           cipo     <= tx_shift[6];
           tx_shift <= {tx_shift[5:0], 1'b0};
-        end
         if (txn_count == '0) begin
           read_next_byte <= 1'b1;
-        end
-        if (tx_start) begin
-          num_write_slots <= read_data[7:4];
-          num_read_slots  <= read_data[3:0];
+          read_next_byte_int <= 1'b1;
         end
       end
     end

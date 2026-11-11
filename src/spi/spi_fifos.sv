@@ -20,8 +20,8 @@ module spi_fifos (
     input  logic       out_push_valid,
     output logic       out_push_ready,
 
-    output logic [params::FIFOS_W-1:0] in_free,
-    output logic [params::FIFOS_W-1:0] out_count
+    output logic [params::FIFOS_W:0] in_free,
+    output logic [params::FIFOS_W:0] out_count
 );
 
     logic in_empty;
