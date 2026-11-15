@@ -12,14 +12,8 @@ module spi_top (
   output logic       cipo,
 
   // fifo to core connection
-  input  logic [7:0]  core_req_addr,
-  input  logic [15:0] core_req_data,
-  input  logic        core_req_valid,
-  output logic        core_req_ready,
-  
-  output logic [15:0] core_resp_data,
-  output logic        core_resp_valid,
-  input  logic        core_resp_ready,
+  core_req_if.sink  core_req,
+  core_resp_if.source core_resp,
 
 
   // fifo to memory connection
@@ -92,41 +86,44 @@ module spi_top (
 
   logic pending_read;
   always_comb begin : host2fifo_ready
-    if (core_req_valid) begin
-      case (core_req_addr)
-        extern_pkg::EXT_FIFO_FROM_HOST: core_req_ready = in_pop_valid & !pending_read;
-        extern_pkg::EXT_FIFO_TO_HOST: core_req_ready = out_push_ready & !pending_read;
-        default: core_req_ready = 1'b1;
+    if (core_req.valid) begin
+      case (core_req.addr)
+        extern_pkg::EXT_FIFO_FROM_HOST: core_req.ready = in_pop_valid & !pending_read;
+        extern_pkg::EXT_FIFO_TO_HOST: core_req.ready = out_push_ready & !pending_read;
+        default: core_req.ready = 1'b1;
       endcase
-    end else core_req_ready = 1'b1;
+    end else core_req.ready = 1'b1;
   end
 
   logic fifo_read_valid, fifo_write_valid;
-  assign fifo_read_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_FROM_HOST);
-  assign fifo_write_valid = core_req_valid & core_req_ready & (core_req_addr == extern_pkg::EXT_FIFO_TO_HOST);
-  // assign core_resp_data = {{8{1'b0}}, in_pop_data};
+  assign fifo_read_valid = core_req.valid & core_req.ready & (core_req.addr == extern_pkg::EXT_FIFO_FROM_HOST);
+  assign fifo_write_valid = core_req.valid & core_req.ready & (core_req.addr == extern_pkg::EXT_FIFO_TO_HOST);
 
   always_ff @(posedge clk ) begin : host2fifo_data
     if (!rst_n) begin
       pending_read <= '0;
-      core_resp_valid <= '0;
+      core_resp.valid <= '0;
+      core_resp.core  <= '0;
     end else begin 
-      core_resp_valid <= '0;
+      core_resp.valid <= '0;
       if (fifo_read_valid | pending_read) begin
-        core_resp_valid <= 1'b1;
-        core_resp_data  <= {{8{1'b0}}, in_pop_data};
-        if (core_resp_ready) begin
+        core_resp.valid <= 1'b1;
+        core_resp.data  <= {{8{1'b0}}, in_pop_data};
+        if (core_resp.ready) begin
           pending_read <= 1'b0;
         end else begin
           pending_read <= 1'b1;
         end
       end
+      if (fifo_read_valid) begin
+        core_resp.core <= core_req.core;
+      end
     end
   end
 
-  assign in_pop_ready = (fifo_read_valid | pending_read) & core_resp_ready;
+  assign in_pop_ready = (fifo_read_valid | pending_read) & core_resp.ready;
   assign out_push_valid = fifo_write_valid;
-  assign out_push_data = core_req_data[7:0];
+  assign out_push_data = core_req.data[7:0];
 
   typedef enum logic [1:0] { 
     IDLE = 2'h0,
@@ -136,7 +133,6 @@ module spi_top (
 
   spi_state_t spi_state;  
   spi_state_t next_spi_state;
-  // logic [params::FIFOS_W-1:0] max_count;
   logic mem_bit;
   logic mem_addr_flag;
   logic [3:0] num_pending_writes, num_sent_reads;

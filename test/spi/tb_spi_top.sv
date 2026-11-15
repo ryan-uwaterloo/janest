@@ -55,19 +55,22 @@ module tb_spi_top;
   logic        sclk = 0, copi = 0, n_cs = 1;
   logic        cipo;
 
-  logic [7:0]  core_req_addr  = '0;
-  logic [15:0] core_req_data  = '0;
-  logic        core_req_valid = 0;
-  logic        core_req_ready;
-  logic [15:0] core_resp_data;
-  logic        core_resp_valid;
-  logic        core_resp_ready = 1;
+  core_req_if  core_req_i();
+  core_resp_if core_resp_i();
+
+  initial begin
+    core_req_i.addr   = '0;
+    core_req_i.data   = '0;
+    core_req_i.valid  = 0;
+    core_req_i.core   = 0;
+    core_resp_i.ready = 1;
+  end
 
   logic [15:0] mem_req_addr, mem_req_data;
   logic        mem_req_valid;
   logic        mem_req_ready = 1;
 
-  spi_top dut (.*);
+  spi_top dut (.*, .core_req(core_req_i), .core_resp(core_resp_i));
 
   int cyc = 0;
   always @(posedge clk) begin
@@ -99,15 +102,15 @@ module tb_spi_top;
   logic        p_rv = 0, p_rr = 0;
   logic [15:0] p_rd = '0;
   always @(posedge clk) if (rst_n) begin
-    if (core_resp_valid && core_resp_ready) begin
-      resp_data_q.push_back(core_resp_data);
+    if (core_resp_i.valid && core_resp_i.ready) begin
+      resp_data_q.push_back(core_resp_i.data);
       resp_cyc_q.push_back(cyc);
     end
     if (p_rv && !p_rr) begin
-      if (!core_resp_valid)               fail("core_resp_valid dropped before core_resp_ready");
-      else if (core_resp_data !== p_rd)   fail("core_resp_data changed while held");
+      if (!core_resp_i.valid)               fail("core_resp_valid dropped before core_resp_ready");
+      else if (core_resp_i.data !== p_rd)   fail("core_resp_data changed while held");
     end
-    p_rv <= core_resp_valid; p_rr <= core_resp_ready; p_rd <= core_resp_data;
+    p_rv <= core_resp_i.valid; p_rr <= core_resp_i.ready; p_rd <= core_resp_i.data;
   end
 
   // memory request channel: capture fires, check "valid held until txn fires"
@@ -188,14 +191,14 @@ module tb_spi_top;
         fire_cyc = -1;
 
         // All callers should arrive 1 time unit after a posedge.
-        core_req_addr  = a;
-        core_req_data  = d;
-        core_req_valid = 1;
+        core_req_i.addr  = a;
+        core_req_i.data  = d;
+        core_req_i.valid = 1;
 
         for (int t = 0; t < timeout && !fired; t++) begin
             @(posedge clk);
 
-            if (core_req_valid && core_req_ready) begin
+            if (core_req_i.valid && core_req_i.ready) begin
                 fired = 1;
                 fire_cyc = cyc;
             end
@@ -203,7 +206,7 @@ module tb_spi_top;
 
         // Deassert away from the sampling edge.
         #1;
-        core_req_valid = 0;
+        core_req_i.valid = 0;
 
         // Guarantee a complete idle cycle before another request.
         tick(1);
@@ -333,7 +336,7 @@ module tb_spi_top;
 
   task automatic reset_dut();
     rst_n = 0; sclk = 0; copi = 0; n_cs = 1;
-    core_req_valid = 0; core_resp_ready = 1; mem_stall_pct = 0; sclk_half = 8;
+    core_req_i.valid = 0; core_resp_i.ready = 1; mem_stall_pct = 0; sclk_half = 8;
     tick(6);
     rst_n = 1;
     tick(6);
@@ -494,23 +497,23 @@ module tb_spi_top;
   task automatic t_resp_hold();                          // F4
     tx_q = '{8'h6B, 8'h6C};
     host_txrx(2, 0);
-    core_resp_ready = 0;
+    core_resp_i.ready = 0;
     begin
       bit fired; int fc;
       resp_data_q.delete(); resp_cyc_q.delete();
       core_req(ADDR_FROM_HOST, 16'h0, 12, fired, fc);
       if (!fired) fail("read not accepted");
-      check_eq("core_resp_valid next cycle", core_resp_valid, 1);
-      check_eq("core_resp_data (held)", core_resp_data, 16'h006B);
+      check_eq("core_resp_valid next cycle", core_resp_i.valid, 1);
+      check_eq("core_resp_data (held)", core_resp_i.data, 16'h006B);
       tick(10);
-      check_eq("core_resp_valid still held", core_resp_valid, 1);
-      check_eq("core_resp_data still held", core_resp_data, 16'h006B);
+      check_eq("core_resp_valid still held", core_resp_i.valid, 1);
+      check_eq("core_resp_data still held", core_resp_i.data, 16'h006B);
       check_eq("no beat while ready low", resp_data_q.size(), 0);
-      core_resp_ready = 1;
+      core_resp_i.ready = 1;
       tick(1);
       check_eq("exactly one beat after release", resp_data_q.size(), 1);
       tick(2);
-      check_eq("core_resp_valid cleared after accept", core_resp_valid, 0);
+      check_eq("core_resp_valid cleared after accept", core_resp_i.valid, 0);
     end
     void'(in_exp.pop_front());
     core_read_expect();                                  // second byte still correct
